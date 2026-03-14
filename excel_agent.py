@@ -1,12 +1,25 @@
 """
 Agent 4 — ExcelAgent
 Responsibility:
-  • Write manual test cases to a new Excel workbook (write_workbook)
-  • Read test cases back from an existing workbook (read_test_cases)
-  • Update automation results in-place (update_results)
+  • write_workbook   — create a new .xlsx from ctx.test_cases
+  • read_test_cases  — read test cases back from an existing workbook
+  • update_results   — write execution results (pass/fail/error/duration/
+                       timestamp) into every relevant sheet AND create a
+                       dedicated "Execution Report" summary sheet
+
+Sheet layout after a full run
+─────────────────────────────
+  Summary            — static run metadata
+  Execution Report   — per-run pass/fail dashboard (created/refreshed on update)
+  Test Cases         — all rows, all columns, results filled in
+  <Module>...        — one sheet per module
 """
-import re
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -18,34 +31,57 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 NAME = "ExcelAgent"
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ── Style helpers ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Style constants
+# ─────────────────────────────────────────────────────────────────────────────
 
 THIN = Border(
     left=Side(style="thin"), right=Side(style="thin"),
     top=Side(style="thin"),  bottom=Side(style="thin"),
 )
+MED_BORDER = Border(
+    left=Side(style="medium"), right=Side(style="medium"),
+    top=Side(style="medium"),  bottom=Side(style="medium"),
+)
+
 FONT_BASE   = Font(name="Arial", size=10)
 FONT_HEADER = Font(name="Arial", size=11, bold=True, color="FFFFFF")
 FONT_BOLD   = Font(name="Arial", size=10, bold=True)
+FONT_TITLE  = Font(name="Arial", size=14, bold=True, color=COLOUR["header_bg"])
+FONT_PASS   = Font(name="Arial", size=10, bold=True, color="375623")
+FONT_FAIL   = Font(name="Arial", size=10, bold=True, color="9C0006")
+FONT_ERROR  = Font(name="Arial", size=10, bold=True, color="7D6608")
 
-FILL_HEADER = PatternFill("solid", fgColor=COLOUR["header_bg"])
-FILL_ALT    = PatternFill("solid", fgColor=COLOUR["alt_row"])
-FILL_PASS   = PatternFill("solid", fgColor=COLOUR["pass_bg"])
-FILL_FAIL   = PatternFill("solid", fgColor=COLOUR["fail_bg"])
-FILL_ERR    = PatternFill("solid", fgColor=COLOUR["error_bg"])
+FILL_HEADER  = PatternFill("solid", fgColor=COLOUR["header_bg"])
+FILL_ALT     = PatternFill("solid", fgColor=COLOUR["alt_row"])
+FILL_PASS    = PatternFill("solid", fgColor=COLOUR["pass_bg"])
+FILL_FAIL    = PatternFill("solid", fgColor=COLOUR["fail_bg"])
+FILL_ERR     = PatternFill("solid", fgColor=COLOUR["error_bg"])
+FILL_SECTION = PatternFill("solid", fgColor="D9E1F2")
 
 PRI_FILL = {
     "High":   PatternFill("solid", fgColor=COLOUR["high_pri"]),
     "Medium": PatternFill("solid", fgColor=COLOUR["med_pri"]),
     "Low":    PatternFill("solid", fgColor=COLOUR["low_pri"]),
 }
+RESULT_FILL = {
+    "Pass":  FILL_PASS,
+    "Fail":  FILL_FAIL,
+    "Error": FILL_ERR,
+}
+RESULT_FONT = {
+    "Pass":  FONT_PASS,
+    "Fail":  FONT_FAIL,
+    "Error": FONT_ERROR,
+}
 
-RESULT_FILL = {"Pass": FILL_PASS, "Fail": FILL_FAIL, "Error": FILL_ERR}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cell helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _header_cell(cell, text: str):
+def _hdr(cell, text: str):
     cell.value     = text
     cell.font      = FONT_HEADER
     cell.fill      = FILL_HEADER
@@ -53,12 +89,16 @@ def _header_cell(cell, text: str):
     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
-def _data_cell(cell, value, alt_row: bool = False, wrap: bool = True):
+def _data(cell, value, alt=False, wrap=True, center=False):
     cell.value     = value
     cell.font      = FONT_BASE
     cell.border    = THIN
-    cell.alignment = Alignment(vertical="top", wrap_text=wrap)
-    if alt_row:
+    cell.alignment = Alignment(
+        horizontal="center" if center else "left",
+        vertical="top",
+        wrap_text=wrap,
+    )
+    if alt:
         cell.fill = FILL_ALT
 
 
@@ -69,7 +109,7 @@ def _apply_col_widths(ws):
 
 def _write_header_row(ws):
     for i, h in enumerate(HEADERS, 1):
-        _header_cell(ws.cell(row=1, column=i), h)
+        _hdr(ws.cell(row=1, column=i), h)
     ws.row_dimensions[1].height = 30
     ws.freeze_panes = "A2"
 
@@ -83,27 +123,154 @@ def _write_tc_row(ws, row: int, tc: TestCase):
         tc.auto_error, tc.executed_at, tc.comments,
     ]
     for col_idx, val in enumerate(vals, 1):
-        _data_cell(ws.cell(row=row, column=col_idx), val, alt_row=alt)
+        _data(ws.cell(row=row, column=col_idx), val, alt=alt)
 
-    # Priority colouring
-    pri_cell      = ws.cell(row=row, column=COL["priority"])
-    pri_cell.fill = PRI_FILL.get(tc.priority.strip().title(), PatternFill())
-    pri_cell.font = FONT_BOLD
-    pri_cell.alignment = Alignment(horizontal="center", vertical="top")
+    # Priority cell
+    pri_cell            = ws.cell(row=row, column=COL["priority"])
+    pri_cell.fill       = PRI_FILL.get(tc.priority.strip().title(), PatternFill())
+    pri_cell.font       = FONT_BOLD
+    pri_cell.alignment  = Alignment(horizontal="center", vertical="top")
 
-    # Auto result colouring
-    res_cell      = ws.cell(row=row, column=COL["auto_result"])
-    res_fill      = RESULT_FILL.get(tc.auto_result.strip().title(), PatternFill())
-    res_cell.fill = res_fill
-    res_cell.alignment = Alignment(horizontal="center", vertical="top")
+    # Result cell
+    res_label = tc.auto_result.strip().title()
+    if res_label:
+        res_cell           = ws.cell(row=row, column=COL["auto_result"])
+        res_cell.fill      = RESULT_FILL.get(res_label, PatternFill())
+        res_cell.font      = RESULT_FONT.get(res_label, FONT_BOLD)
+        res_cell.alignment = Alignment(horizontal="center", vertical="top")
 
     ws.row_dimensions[row].height = 60
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution Report sheet builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ER_COLS = [
+    ("Test Case ID", 14), ("Title", 38), ("Module", 20),
+    ("Priority", 12),     ("Type", 18),  ("Result", 12),
+    ("Duration (ms)", 15), ("Executed At", 22), ("Error Summary", 55),
+]
+
+def _build_execution_report(wb: Workbook, results: list[AutomationResult],
+                             test_cases: list[TestCase], run_ts: str):
+    """
+    Create (or replace) the 'Execution Report' sheet with:
+      - Run statistics banner
+      - Per-test result table with duration and error summary
+    """
+    # Remove existing sheet if present
+    if "Execution Report" in wb.sheetnames:
+        del wb["Execution Report"]
+
+    # Insert as second sheet
+    er = wb.create_sheet("Execution Report", 1)
+
+    # Build lookup maps
+    result_map  = {r.test_case_id: r for r in results}
+    tc_map      = {tc.test_case_id: tc for tc in test_cases}
+
+    total   = len(results)
+    passed  = sum(1 for r in results if r.passed)
+    failed  = total - passed
+    errors  = sum(1 for r in results if not r.passed and "Error" in r.error_message[:20])
+    avg_ms  = int(sum(r.duration_ms for r in results) / max(total, 1))
+    pct     = f"{(passed/max(total,1)*100):.1f}%"
+
+    # ── Banner (rows 1-8) ────────────────────────────────────────────────────
+    er.merge_cells("A1:I1")
+    title_cell       = er["A1"]
+    title_cell.value = "Execution Report"
+    title_cell.font  = FONT_TITLE
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    er.row_dimensions[1].height = 36
+
+    stats = [
+        ("Run Timestamp",  run_ts),
+        ("Total Tests",    total),
+        ("✅  Passed",      passed),
+        ("❌  Failed",      failed),
+        ("Pass Rate",       pct),
+        ("Avg Duration",   f"{avg_ms} ms"),
+    ]
+    for r_off, (label, value) in enumerate(stats, start=2):
+        lbl_cell       = er.cell(row=r_off, column=1, value=label)
+        lbl_cell.font  = FONT_BOLD
+        lbl_cell.fill  = FILL_SECTION
+        lbl_cell.border = THIN
+        lbl_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        val_cell       = er.cell(row=r_off, column=2, value=value)
+        val_cell.font  = FONT_BASE
+        val_cell.border = THIN
+        val_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+        # Colour pass/fail counts
+        if label == "✅  Passed":
+            val_cell.fill = FILL_PASS
+            val_cell.font = FONT_PASS
+        elif label == "❌  Failed":
+            val_cell.fill = FILL_FAIL
+            val_cell.font = FONT_FAIL
+
+        er.row_dimensions[r_off].height = 20
+
+    # ── Results table header (row 9) ─────────────────────────────────────────
+    TABLE_START = 9
+    er.row_dimensions[TABLE_START].height = 28
+    for col_idx, (hdr_text, width) in enumerate(_ER_COLS, 1):
+        _hdr(er.cell(row=TABLE_START, column=col_idx), hdr_text)
+        er.column_dimensions[get_column_letter(col_idx)].width = width
+
+    er.freeze_panes = f"A{TABLE_START + 1}"
+
+    # ── Results rows ──────────────────────────────────────────────────────────
+    for row_off, r in enumerate(results, start=TABLE_START + 1):
+        alt = row_off % 2 == 0
+        tc  = tc_map.get(r.test_case_id)
+
+        result_label = "Pass" if r.passed else (
+            "Error" if r.error_message and r.error_message.startswith("Execution error")
+            else "Fail"
+        )
+
+        # One-line error summary (last non-blank line of traceback)
+        error_lines   = [l.strip() for l in r.error_message.splitlines() if l.strip()]
+        error_summary = error_lines[-1][:200] if error_lines else ""
+
+        row_vals = [
+            r.test_case_id,
+            tc.test_case_title if tc else "",
+            tc.module          if tc else "",
+            tc.priority        if tc else "",
+            tc.test_type       if tc else "",
+            result_label,
+            r.duration_ms,
+            r.executed_at,
+            error_summary,
+        ]
+
+        for col_idx, val in enumerate(row_vals, 1):
+            cell = er.cell(row=row_off, column=col_idx)
+            _data(cell, val, alt=alt, wrap=True,
+                  center=(col_idx in (1, 4, 5, 6, 7)))
+
+        # Colour the Result cell
+        res_cell      = er.cell(row=row_off, column=6)
+        res_cell.fill = RESULT_FILL.get(result_label, PatternFill())
+        res_cell.font = RESULT_FONT.get(result_label, FONT_BOLD)
+
+        er.row_dimensions[row_off].height = 22
+
+    # Column A (ID) width
+    er.column_dimensions["A"].width = 14
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# write_workbook
+# ─────────────────────────────────────────────────────────────────────────────
 
 def write_workbook(ctx: AgentContext) -> str:
-    """Create a new workbook from ctx.test_cases. Returns path."""
     test_cases = ctx.test_cases
     url        = ctx.url
     page_title = ctx.page_analyses[-1].page_title if ctx.page_analyses else url
@@ -111,37 +278,37 @@ def write_workbook(ctx: AgentContext) -> str:
     wb = Workbook()
     wb.remove(wb.active)
 
-    # ── Summary sheet ──────────────────────────────────────────────────
+    # ── Summary sheet ──────────────────────────────────────────────────────
     ss = wb.create_sheet("Summary")
     ss.column_dimensions["A"].width = 28
     ss.column_dimensions["B"].width = 60
 
     ss["A1"] = "Test Report Summary"
-    ss["A1"].font = Font(name="Arial", size=16, bold=True, color=COLOUR["header_bg"])
+    ss["A1"].font = FONT_TITLE
     ss.merge_cells("A1:B1")
     ss["A1"].alignment = Alignment(horizontal="center")
 
-    summary_rows = [
+    rows = [
         ("Report Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ("URL Tested", url),
         ("Page Title", page_title),
         ("Total Test Cases", len(test_cases)),
-        ("High Priority", sum(1 for t in test_cases if t.priority.title() == "High")),
+        ("High Priority",   sum(1 for t in test_cases if t.priority.title() == "High")),
         ("Medium Priority", sum(1 for t in test_cases if t.priority.title() == "Medium")),
-        ("Low Priority", sum(1 for t in test_cases if t.priority.title() == "Low")),
+        ("Low Priority",    sum(1 for t in test_cases if t.priority.title() == "Low")),
     ]
-    for r, (lbl, val) in enumerate(summary_rows, start=3):
-        ss.cell(row=r, column=1, value=lbl).font  = FONT_BOLD
-        ss.cell(row=r, column=2, value=val).font  = FONT_BASE
+    for r_idx, (lbl, val) in enumerate(rows, start=3):
+        ss.cell(row=r_idx, column=1, value=lbl).font = FONT_BOLD
+        ss.cell(row=r_idx, column=2, value=val).font = FONT_BASE
 
-    # ── All Test Cases sheet ───────────────────────────────────────────
-    ts = wb.create_sheet("Test Cases")
-    _write_header_row(ts)
-    _apply_col_widths(ts)
+    # ── All Test Cases sheet ───────────────────────────────────────────────
+    ts_ws = wb.create_sheet("Test Cases")
+    _write_header_row(ts_ws)
+    _apply_col_widths(ts_ws)
     for i, tc in enumerate(test_cases, start=2):
-        _write_tc_row(ts, i, tc)
+        _write_tc_row(ts_ws, i, tc)
 
-    # ── Per-module sheets ──────────────────────────────────────────────
+    # ── Per-module sheets ──────────────────────────────────────────────────
     modules: dict[str, list[TestCase]] = {}
     for tc in test_cases:
         modules.setdefault(tc.module, []).append(tc)
@@ -154,10 +321,10 @@ def write_workbook(ctx: AgentContext) -> str:
         for i, tc in enumerate(mod_cases, start=2):
             _write_tc_row(ms, i, tc)
 
-    # ── Save ───────────────────────────────────────────────────────────
-    ts_stamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ── Save ───────────────────────────────────────────────────────────────
+    stamp      = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_title = re.sub(r"[^\w\-]", "_", page_title)[:40]
-    path       = OUTPUT_DIR / f"test_cases_{safe_title}_{ts_stamp}.xlsx"
+    path       = OUTPUT_DIR / f"test_cases_{safe_title}_{stamp}.xlsx"
     wb.save(str(path))
 
     ctx.excel_path = str(path)
@@ -165,19 +332,20 @@ def write_workbook(ctx: AgentContext) -> str:
     return str(path)
 
 
-def read_test_cases(excel_path: str) -> list[TestCase]:
-    """Read TestCase rows from the 'Test Cases' sheet of an existing workbook."""
-    wb = load_workbook(excel_path, data_only=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# read_test_cases
+# ─────────────────────────────────────────────────────────────────────────────
 
+def read_test_cases(excel_path: str) -> list[TestCase]:
+    wb = load_workbook(excel_path, data_only=True)
     if "Test Cases" not in wb.sheetnames:
-        log("error", NAME, "Sheet 'Test Cases' not found in workbook")
+        log("error", NAME, "Sheet 'Test Cases' not found")
         return []
 
-    ws = wb["Test Cases"]
-    test_cases: list[TestCase] = []
-
+    ws         = wb["Test Cases"]
+    test_cases = []
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row[0]:           # empty row guard
+        if not row[0]:
             continue
         tc = TestCase(
             test_case_id    = str(row[COL["id"] - 1]            or ""),
@@ -202,17 +370,26 @@ def read_test_cases(excel_path: str) -> list[TestCase]:
     return test_cases
 
 
-def update_results(excel_path: str, results: list[AutomationResult]):
+# ─────────────────────────────────────────────────────────────────────────────
+# update_results  ← the key method
+# ─────────────────────────────────────────────────────────────────────────────
+
+def update_results(excel_path: str, results: list[AutomationResult],
+                   test_cases: list[TestCase] | None = None):
     """
-    Update automation columns (auto_result, auto_error, executed_at, auto_script,
-    status) in-place for every sheet that contains matching test case IDs.
+    1. Update every data sheet (Test Cases + module sheets) in-place:
+       auto_result, auto_error, executed_at, duration, status
+    2. Build/refresh the 'Execution Report' sheet
+    3. Refresh execution stats on the Summary sheet
     """
     result_map = {r.test_case_id: r for r in results}
+    run_ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     wb = load_workbook(excel_path)
 
+    # ── Step 1: update data rows in all test-case sheets ─────────────────────
     for sheet_name in wb.sheetnames:
-        if sheet_name == "Summary":
+        if sheet_name in ("Summary", "Execution Report"):
             continue
         ws = wb[sheet_name]
 
@@ -224,63 +401,102 @@ def update_results(excel_path: str, results: list[AutomationResult]):
             r   = result_map[str(tc_id)]
             alt = row_idx % 2 == 0
 
-            def _upd(col_key: str, value):
-                cell        = ws.cell(row=row_idx, column=COL[col_key])
-                cell.value  = value
-                cell.font   = FONT_BASE
-                cell.border = THIN
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
-                if alt and col_key not in ("auto_result",):
+            result_label = "Pass" if r.passed else (
+                "Error" if r.error_message.startswith("Execution error")
+                else "Fail"
+            )
+
+            # Helper: write a plain data cell
+            def _w(col_key, value, center=False):
+                cell = ws.cell(row=row_idx, column=COL[col_key])
+                cell.value     = value
+                cell.font      = FONT_BASE
+                cell.border    = THIN
+                cell.alignment = Alignment(
+                    horizontal="center" if center else "left",
+                    vertical="top", wrap_text=True,
+                )
+                if alt:
                     cell.fill = FILL_ALT
 
-            _upd("auto_script",  r.script)
-            _upd("auto_error",   r.error_message)
-            _upd("executed_at",  r.executed_at)
+            _w("auto_script",  r.script)
+            _w("auto_error",   r.error_message)
+            _w("executed_at",  r.executed_at,  center=True)
 
-            result_label = "Pass" if r.passed else ("Error" if "Error" in r.error_message else "Fail")
-            res_cell     = ws.cell(row=row_idx, column=COL["auto_result"])
+            # Duration — store in the "comments" column if no dedicated col,
+            # or append to executed_at cell (we embed it as " (Xms)")
+            exec_cell = ws.cell(row=row_idx, column=COL["executed_at"])
+            exec_cell.value = f"{r.executed_at}  ({r.duration_ms} ms)"
+
+            # Auto result — coloured
+            res_cell           = ws.cell(row=row_idx, column=COL["auto_result"])
             res_cell.value     = result_label
-            res_cell.font      = FONT_BOLD
-            res_cell.border    = THIN
+            res_cell.font      = RESULT_FONT.get(result_label, FONT_BOLD)
             res_cell.fill      = RESULT_FILL.get(result_label, PatternFill())
+            res_cell.border    = THIN
             res_cell.alignment = Alignment(horizontal="center", vertical="top")
 
+            # Status
             status_cell        = ws.cell(row=row_idx, column=COL["status"])
             status_cell.value  = "Executed"
             status_cell.font   = FONT_BASE
             status_cell.border = THIN
+            status_cell.alignment = Alignment(horizontal="center", vertical="top")
 
-    # Refresh summary counts
+    # ── Step 2: Execution Report sheet ───────────────────────────────────────
+    # We need the full TestCase list; try to rebuild from the workbook if not passed
+    if test_cases is None:
+        test_cases = read_test_cases(excel_path)   # re-reads from the already-open wb? No — safe, uses data_only
+
+    _build_execution_report(wb, results, test_cases, run_ts)
+
+    # ── Step 3: Refresh Summary stats ────────────────────────────────────────
     if "Summary" in wb.sheetnames:
-        ss    = wb["Summary"]
-        total = len(results)
+        ss     = wb["Summary"]
+        total  = len(results)
         passed = sum(1 for r in results if r.passed)
         failed = total - passed
+        avg_ms = int(sum(r.duration_ms for r in results) / max(total, 1))
 
-        extra = [
-            ("Automated Tests Run", total),
-            ("Passed", passed),
-            ("Failed", failed),
-            ("Last Run", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        exec_stats = [
+            ("── Execution Results ──",  ""),
+            ("Last Run At",              run_ts),
+            ("Tests Executed",           total),
+            ("Passed",                   passed),
+            ("Failed",                   failed),
+            ("Pass Rate",                f"{passed/max(total,1)*100:.1f}%"),
+            ("Avg Duration",             f"{avg_ms} ms"),
         ]
-        start_row = 11
-        for i, (lbl, val) in enumerate(extra):
-            ss.cell(row=start_row + i, column=1, value=lbl).font = FONT_BOLD
-            ss.cell(row=start_row + i, column=2, value=val).font = FONT_BASE
+        start_row = 12   # leave rows 3-11 for static metadata
+        for i, (lbl, val) in enumerate(exec_stats):
+            lbl_cell = ss.cell(row=start_row + i, column=1, value=lbl)
+            val_cell = ss.cell(row=start_row + i, column=2, value=val)
+            lbl_cell.font = FONT_BOLD
+            val_cell.font = FONT_BASE
+
+            if lbl == "Passed":
+                val_cell.fill = FILL_PASS
+                val_cell.font = FONT_PASS
+            elif lbl == "Failed":
+                val_cell.fill = FILL_FAIL
+                val_cell.font = FONT_FAIL
 
     wb.save(excel_path)
-    log("excel", NAME, f"Updated {len(results)} results in {excel_path}")
+    log("excel", NAME,
+        f"Results written — "
+        f"{sum(1 for r in results if r.passed)} passed, "
+        f"{sum(1 for r in results if not r.passed)} failed → {excel_path}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent entry-point
+# ─────────────────────────────────────────────────────────────────────────────
 
 def run(ctx: AgentContext, mode: str = "write") -> str:
-    """
-    mode='write'  → write new workbook from ctx.test_cases
-    mode='update' → update results in ctx.excel_path
-    """
     if mode == "write":
         return write_workbook(ctx)
     elif mode == "update":
-        update_results(ctx.excel_path, ctx.automation_results)
+        update_results(ctx.excel_path, ctx.automation_results, ctx.test_cases)
         return ctx.excel_path
     else:
         raise ValueError(f"Unknown ExcelAgent mode: {mode}")

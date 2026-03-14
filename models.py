@@ -58,6 +58,7 @@ class AutomationResult:
     passed: bool
     error_message: str = ""
     executed_at: str = ""
+    duration_ms: int = 0
     script: str = ""
 
 

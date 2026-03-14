@@ -8,7 +8,9 @@ from pathlib import Path
 # ── Groq Models ──────────────────────────────────────────────────────────────
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 TEXT_MODEL   = "llama-3.3-70b-versatile"
-GROQ_API_KEY ="YOUR_GROQ_API_KEY"  # set as env var or directly here (not recommended)
+GROQ_API_KEY = "YOUR_GROQ_API_KEY"   # set as env var or directly here (not recommended)
+
+# set as env var or directly here (not recommended)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parent.parent
