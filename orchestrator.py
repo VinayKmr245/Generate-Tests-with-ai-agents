@@ -1,51 +1,106 @@
 """
-Orchestrator — wires all agents into a multi-agent pipeline.
+Web Test Agent — Orchestrator
+═════════════════════════════
 
 Pipeline modes
 ──────────────
-full       : BrowserAgent → VisionAgent → TestGenerationAgent
-             → ExcelAgent(write) → ScriptGenerationAgent → ScriptExportAgent
-             → TestExecutionAgent → ExcelAgent(update)
+  full       Browse → Analyse → Generate tests → Export scripts
+             → Execute → Update Excel
+             (complete end-to-end run)
 
-generate   : Same as full but stops after ExcelAgent(write)
-             (no automation)
+  generate   Browse → Analyse → Generate tests → Write Excel only
+             (no script execution)
 
-automate   : Reads an existing Excel file, generates scripts,
-             runs them, and writes results back.
+  automate   Read existing Excel → Generate scripts → Execute → Update Excel
+             (re-run automation on a previously generated test suite)
 
+─────────────────────────────────────────────────────────────────────────────
 Usage
-─────
-  python orchestrator.py full    <url> [username] [password]
-  python orchestrator.py generate <url> [username] [password]
-  python orchestrator.py automate <excel_path> <url> [username] [password]
+──────────────────────────────────────────────────────────────────────────────
+
+  # Public page — no login required
+  python orchestrator.py full https://example.com
+
+  # Page with login
+  python orchestrator.py full https://app.example.com --user admin@x.com --pass secret
+
+  # Login then navigate to a specific page and generate tests for ONE module
+  python orchestrator.py full https://app.example.com \\
+      --user admin@x.com --pass secret \\
+      --target https://app.example.com/profile \\
+      --module "User Profile"
+
+  # Generate tests for the Settings page after login
+  python orchestrator.py full https://app.example.com \\
+      --user admin@x.com --pass secret \\
+      --target https://app.example.com/settings \\
+      --module "Settings"
+
+  # Generate only (no automation / execution)
+  python orchestrator.py generate https://app.example.com \\
+      --user admin@x.com --pass secret \\
+      --target https://app.example.com/dashboard \\
+      --module "Dashboard"
+
+  # Automate an existing Excel
+  python orchestrator.py automate output/test_cases_Profile_20260314.xlsx \\
+      https://app.example.com --user admin@x.com --pass secret
+
+─────────────────────────────────────────────────────────────────────────────
+Arguments
+──────────────────────────────────────────────────────────────────────────────
+
+  Positional
+  ──────────
+  mode            full | generate | automate
+  url             Login URL  (or base URL for public pages)
+                  For 'automate': path to the existing .xlsx file
+
+  Named (optional)
+  ────────────────
+  --user  <str>   Username / email for login
+  --pass  <str>   Password for login
+  --target <url>  URL to navigate to AFTER login before capturing the
+                  screenshot for test generation.
+                  Use this to scope tests to a specific page/feature.
+                  Default: stays on the post-login landing page.
+  --module <str>  Module name to assign to ALL generated test cases.
+                  The LLM prompt is also scoped to this feature area,
+                  producing much more focused and relevant tests.
+                  Example: "User Profile", "Settings", "Order History"
+                  Default: LLM infers a module name from the page content.
 """
+import argparse
 import asyncio
 import sys
+from pathlib import Path
 
-import browser_agent
-import excel_agent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import browser_agent as browser_agent
+import excel_agent as excel_agent
 import script_export_agent as script_export_agent
 import script_generation_agent as script_gen_agent
 import test_execution_agent as exec_agent
 import test_generation_agent as test_gen_agent
-import vision_agent
+import vision_agent as vision_agent
 from logger import log, section
 from models import AgentContext
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Sub-pipelines
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def _browser_phase(ctx: AgentContext) -> dict:
     section("Agent 1 — Browser Agent")
     return await browser_agent.run(ctx)
 
 
-def _vision_phase(ctx: AgentContext, browser_result: dict):
+def _vision_phase(ctx: AgentContext, browser_result: dict) -> bool:
+    """Returns True if a re-run with credentials is needed."""
     section("Agent 2 — Vision Agent")
     vision_agent.run(ctx, browser_result)
 
-    # If login was needed but not yet attempted (no creds passed), prompt now
     needs_login = any(
         a.requires_login or a.login_form.detected
         for a in ctx.page_analyses
@@ -55,12 +110,18 @@ def _vision_phase(ctx: AgentContext, browser_result: dict):
         username = input("  Enter username: ").strip()
         password = input("  Enter password: ").strip()
         ctx.credentials = {"username": username, "password": password}
-        return True   # signal: re-run browser with creds
+        return True
     return False
 
 
 def _generation_phase(ctx: AgentContext):
     section("Agent 3 — Test Generation Agent")
+    if ctx.module_name:
+        log("info", "Orchestrator",
+            f"Module scope: '{ctx.module_name}' — tests will be targeted to this feature")
+    if ctx.target_url:
+        log("info", "Orchestrator",
+            f"Target URL: {ctx.target_url}")
     test_gen_agent.run(ctx)
 
 
@@ -74,15 +135,15 @@ def _script_phase(ctx: AgentContext):
     script_gen_agent.run(ctx)
 
 
-def _execution_phase(ctx: AgentContext):
-    section("Agent 6 — Test Execution Agent")
-    exec_agent.run(ctx)
-
-
 def _script_export_phase(ctx: AgentContext):
     section("Agent 7 — Script Export Agent")
     script_export_agent.run(ctx)
     log("success", "Orchestrator", f"Scripts folder → {ctx.scripts_dir}")
+
+
+def _execution_phase(ctx: AgentContext):
+    section("Agent 6 — Test Execution Agent")
+    exec_agent.run(ctx)
 
 
 def _excel_update_phase(ctx: AgentContext):
@@ -90,51 +151,61 @@ def _excel_update_phase(ctx: AgentContext):
     excel_agent.run(ctx, mode="update")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Public pipeline entry points
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline entry points
+# ─────────────────────────────────────────────────────────────────────────────
 
-async def run_full_pipeline(url: str, credentials: dict | None = None) -> str:
-    """Full pipeline: browse → analyse → generate → excel → automate → update."""
-    ctx = AgentContext(url=url, credentials=credentials)
+async def run_full_pipeline(
+    url: str,
+    credentials: dict | None = None,
+    target_url: str | None   = None,
+    module_name: str | None  = None,
+    headed: bool             = False,
+    slow_mo: int             = 400,
+) -> str:
+    """Full pipeline: browse → analyse → generate → excel → scripts → execute → update."""
+    ctx             = AgentContext(url=url, credentials=credentials)
+    ctx.target_url  = target_url
+    ctx.module_name = module_name
+    ctx.headed      = headed
+    ctx.slow_mo     = slow_mo if headed else 0
 
-    # Phase 1 — Browse
     browser_result = await _browser_phase(ctx)
 
-    # Phase 2 — Vision (may prompt for creds)
     needs_retry = _vision_phase(ctx, browser_result)
     if needs_retry:
         browser_result = await _browser_phase(ctx)
         _vision_phase(ctx, browser_result)
 
-    # Phase 3 — Generate manual test cases
     _generation_phase(ctx)
-
-    # Phase 4 — Write initial Excel
     _excel_write_phase(ctx)
     log("excel", "Orchestrator", f"Excel saved → {ctx.excel_path}")
 
-    # Phase 5 — Generate Playwright scripts
     _script_phase(ctx)
-
-    # Phase 5b — Export each script to its own .py file
     _script_export_phase(ctx)
-
-    # Phase 6 — Execute scripts
     _execution_phase(ctx)
-
-    # Phase 7 — Update Excel with results
     _excel_update_phase(ctx)
 
     section("Pipeline Complete")
-    log("success", "Orchestrator", f"Excel report  → {ctx.excel_path}")
+    log("success", "Orchestrator", f"Excel report   → {ctx.excel_path}")
     log("success", "Orchestrator", f"Scripts folder → {ctx.scripts_dir}")
     return ctx.excel_path
 
 
-async def run_generate_only(url: str, credentials: dict | None = None) -> str:
-    """Browse, analyse, generate test cases, write Excel only (no automation)."""
-    ctx = AgentContext(url=url, credentials=credentials)
+async def run_generate_only(
+    url: str,
+    credentials: dict | None = None,
+    target_url: str | None   = None,
+    module_name: str | None  = None,
+    headed: bool             = False,
+    slow_mo: int             = 400,
+) -> str:
+    """Browse → analyse → generate test cases → write Excel. No script execution."""
+    ctx             = AgentContext(url=url, credentials=credentials)
+    ctx.target_url  = target_url
+    ctx.module_name = module_name
+    ctx.headed      = headed
+    ctx.slow_mo     = slow_mo if headed else 0
 
     browser_result = await _browser_phase(ctx)
     needs_retry    = _vision_phase(ctx, browser_result)
@@ -150,12 +221,12 @@ async def run_generate_only(url: str, credentials: dict | None = None) -> str:
     return ctx.excel_path
 
 
-async def run_automate_existing(excel_path: str, url: str,
-                                credentials: dict | None = None) -> str:
-    """
-    Read test cases from an existing Excel, generate scripts,
-    execute them, and write results back to the same file.
-    """
+async def run_automate_existing(
+    excel_path: str,
+    url: str,
+    credentials: dict | None = None,
+) -> str:
+    """Read existing Excel → generate & execute scripts → write results back."""
     ctx            = AgentContext(url=url, credentials=credentials)
     ctx.excel_path = excel_path
 
@@ -173,46 +244,176 @@ async def run_automate_existing(excel_path: str, url: str,
     return ctx.excel_path
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI entry point
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _usage():
-    print(__doc__)
-    sys.exit(1)
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog        = "orchestrator.py",
+        description = "Web Test Agent — generate and execute Playwright test cases",
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        epilog = """
+Examples:
+  # Public page
+  python orchestrator.py full https://example.com
+
+  # Login only (stays on post-login landing page)
+  python orchestrator.py full https://app.example.com --user admin@x.com --pass secret
+
+  # Login + navigate to User Profile + scope tests to that module
+  python orchestrator.py full https://app.example.com \\
+      --user admin@x.com --pass secret \\
+      --target https://app.example.com/profile \\
+      --module "User Profile"
+
+  # Generate only, no execution
+  python orchestrator.py generate https://app.example.com \\
+      --user admin@x.com --pass secret \\
+      --target https://app.example.com/settings \\
+      --module "Settings"
+
+  # Re-run automation on an existing Excel
+  python orchestrator.py automate output/test_cases_Profile.xlsx \\
+      https://app.example.com --user admin@x.com --pass secret
+        """
+    )
+
+    parser.add_argument(
+        "mode",
+        choices=["full", "generate", "automate"],
+        help="Pipeline mode: full | generate | automate",
+    )
+    parser.add_argument(
+        "url",
+        help=(
+            "Login / base URL of the application. "
+            "For 'automate' mode: path to the existing .xlsx file, "
+            "followed by the base URL as the second positional argument."
+        ),
+    )
+    # automate mode needs the base URL as a second positional
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default=None,
+        help="Base URL (required for 'automate' mode — url arg is the .xlsx path)",
+    )
+
+    auth = parser.add_argument_group("Authentication")
+    auth.add_argument("--user", metavar="USERNAME", help="Login username / email")
+    auth.add_argument("--pass", dest="password", metavar="PASSWORD", help="Login password")
+
+    targeting = parser.add_argument_group("Module targeting")
+    targeting.add_argument(
+        "--target",
+        metavar="URL",
+        help=(
+            "URL to navigate to AFTER login before generating tests. "
+            "Use this to scope tests to a specific feature page. "
+            "Example: https://app.example.com/profile"
+        ),
+    )
+    targeting.add_argument(
+        "--module",
+        metavar="NAME",
+        help=(
+            'Module name to assign to all generated test cases AND to focus '
+            'the LLM prompt on. Example: "User Profile", "Settings", "Orders"'
+        ),
+    )
+
+    execution = parser.add_argument_group("Execution display")
+    execution.add_argument(
+        "--headed",
+        action="store_true",
+        default=False,
+        help=(
+            "Run tests in a visible browser window instead of headless. "
+            "Tests execute one-at-a-time so windows don't stack up. "
+            "Useful for debugging or watching tests run live."
+        ),
+    )
+    execution.add_argument(
+        "--slow-mo",
+        dest="slow_mo",
+        type=int,
+        default=400,
+        metavar="MS",
+        help=(
+            "Milliseconds of delay between each Playwright action in headed "
+            "mode. Higher = easier to follow. Default: 400ms. Ignored when "
+            "running headless."
+        ),
+    )
+
+    return parser
 
 
 async def main():
-    args = sys.argv[1:]
-    if not args:
-        _usage()
+    # Support both old-style positional args and new --flag style
+    # Old: python orchestrator.py full <url> [user] [pass]
+    # New: python orchestrator.py full <url> --user x --pass y --target t --module m
+    parser = _build_parser()
 
-    mode = args[0].lower()
+    # Legacy positional compatibility:
+    # If 3rd/4th args don't start with '--' treat them as user/pass
+    raw_args = sys.argv[1:]
+    patched  = list(raw_args)
 
-    if mode == "full":
-        if len(args) < 2:
-            _usage()
-        url   = args[1]
-        creds = {"username": args[2], "password": args[3]} if len(args) >= 4 else None
-        await run_full_pipeline(url, creds)
+    # Detect legacy: "full <url> <user> <pass>" (no -- flags for credentials)
+    if (len(patched) >= 4
+            and patched[0] in ("full", "generate")
+            and not patched[2].startswith("--")
+            and not patched[3].startswith("--")):
+        # Transform to new style
+        patched = [patched[0], patched[1],
+                   "--user", patched[2], "--pass", patched[3]] + patched[4:]
 
-    elif mode == "generate":
-        if len(args) < 2:
-            _usage()
-        url   = args[1]
-        creds = {"username": args[2], "password": args[3]} if len(args) >= 4 else None
-        await run_generate_only(url, creds)
+    # Legacy automate: "automate <excel> <url> [user] [pass]"
+    if (len(patched) >= 5
+            and patched[0] == "automate"
+            and not patched[3].startswith("--")
+            and not patched[4].startswith("--")):
+        patched = [patched[0], patched[1], patched[2],
+                   "--user", patched[3], "--pass", patched[4]] + patched[5:]
 
-    elif mode == "automate":
-        if len(args) < 3:
-            _usage()
-        excel = args[1]
-        url   = args[2]
-        creds = {"username": args[3], "password": args[4]} if len(args) >= 5 else None
-        await run_automate_existing(excel, url, creds)
+    args = parser.parse_args(patched)
 
-    else:
-        _usage()
+    creds = (
+        {"username": args.user, "password": args.password}
+        if args.user and args.password
+        else None
+    )
+
+    if args.mode == "full":
+        await run_full_pipeline(
+            url         = args.url,
+            credentials = creds,
+            target_url  = args.target,
+            module_name = args.module,
+            headed      = args.headed,
+            slow_mo     = args.slow_mo,
+        )
+
+    elif args.mode == "generate":
+        await run_generate_only(
+            url         = args.url,
+            credentials = creds,
+            target_url  = args.target,
+            module_name = args.module,
+            headed      = args.headed,
+            slow_mo     = args.slow_mo,
+        )
+
+    elif args.mode == "automate":
+        if not args.base_url:
+            parser.error("automate mode requires: orchestrator.py automate <excel_path> <url>")
+        await run_automate_existing(
+            excel_path  = args.url,        # first positional = excel path
+            url         = args.base_url,   # second positional = base url
+            credentials = creds,
+        )
 
 
 if __name__ == "__main__":

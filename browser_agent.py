@@ -3,14 +3,20 @@ Agent 1 — BrowserAgent
 Responsibility: Open URLs, capture screenshots, detect & perform login.
 Outputs: screenshot_b64 strings + post-login URL for downstream agents.
 """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import asyncio
 import base64
+
+from playwright.async_api import Page, async_playwright
 
 from config import (BROWSER_USER_AGENT, BROWSER_VIEWPORT, NETWORK_IDLE_TIMEOUT,
                     PAGE_LOAD_TIMEOUT)
 from logger import log
 from models import AgentContext
-from playwright.async_api import Page, async_playwright
 
 NAME = "BrowserAgent"
 
@@ -124,9 +130,14 @@ async def run(ctx: AgentContext) -> dict:
             result["login_succeeded"] = success
 
             if success:
-                log("success", NAME, "Login succeeded — capturing post-login screenshot")
+                log("success", NAME, "Login succeeded")
+                # If caller wants tests for a specific page/module, navigate there now
+                if ctx.target_url and ctx.target_url != ctx.url:
+                    log("browser", NAME, f"Navigating to target → {ctx.target_url}")
+                    await _safe_goto(page, ctx.target_url)
                 post_shot = await _screenshot(page)
                 result["post_login"] = {"screenshot_b64": post_shot, "url": page.url}
+                log("browser", NAME, f"Post-login screenshot captured at {page.url}")
             else:
                 log("warning", NAME, "Login attempt failed")
 

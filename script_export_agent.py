@@ -50,6 +50,7 @@ _IMPORT_LINES_TO_STRIP = {
 # The fixed import block that every exported file must start with
 _FILE_IMPORTS = """\
 import asyncio
+import os
 import pytest
 from playwright.async_api import async_playwright, expect
 """
@@ -135,16 +136,36 @@ def _build_file(tc: TestCase, url: str) -> str:
         "",
     ]
 
-    # ── Imports — always the same three lines ─────────────────────────
+    # ── Imports — always emit these lines ───────────────────────────
     lines += [
         "import asyncio",
+        "import os",
         "import pytest",
         "from playwright.async_api import async_playwright, expect",
+        "",
+        "# Headed mode: set PLAYWRIGHT_HEADED=1 to watch the browser",
+        "# Set PLAYWRIGHT_SLOW_MO=<ms> to control action delay (default 400ms)",
+        "_HEADLESS = os.environ.get('PLAYWRIGHT_HEADED', '0') != '1'",
+        "_SLOW_MO  = int(os.environ.get('PLAYWRIGHT_SLOW_MO', '400')) if not _HEADLESS else 0",
         "",
         "",
     ]
 
     # ── Core test logic ───────────────────────────────────────────────
+    # Replace any hardcoded headless value so the exported file honours
+    # the PLAYWRIGHT_HEADED env var at runtime.
+    script_body = script_body.replace(
+        "headless=True",  "headless=_HEADLESS"
+    ).replace(
+        "headless=False", "headless=_HEADLESS"
+    )
+    # Also wire slow_mo into the launch call if not already present
+    import re as _re
+    script_body = _re.sub(
+        r'(p\.chromium\.launch\(headless=_HEADLESS)\)',
+        r'\1, slow_mo=_SLOW_MO)',
+        script_body,
+    )
     lines += [
         "# ── Core test logic (run standalone or via pytest) " + "─" * 20,
     ]
@@ -340,4 +361,5 @@ def run(ctx: AgentContext) -> str:
     log("agent", NAME, f"Exporting {len(ctx.test_cases)} scripts to individual files")
     scripts_dir   = export_scripts(ctx)
     ctx.scripts_dir = scripts_dir
+    return scripts_dir
     return scripts_dir

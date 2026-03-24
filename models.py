@@ -67,8 +67,14 @@ class AgentContext:
     """Passed between agents to carry shared state."""
     url: str
     credentials: Optional[dict] = None
+    # Optional: navigate here AFTER login before screenshotting
+    target_url: Optional[str] = None
+    # Optional: force all generated test cases into this module name
+    module_name: Optional[str] = None
     page_analyses: list[PageAnalysis] = field(default_factory=list)
     test_cases: list[TestCase] = field(default_factory=list)
     automation_results: list[AutomationResult] = field(default_factory=list)
     excel_path: str = ""
     scripts_dir: str = ""   # populated by ScriptExportAgent
+    headed: bool = False    # True → visible browser window during test execution
+    slow_mo: int = 400      # ms delay between actions in headed mode

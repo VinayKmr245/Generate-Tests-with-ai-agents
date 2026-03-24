@@ -2,19 +2,21 @@
 Agent 6 — TestExecutionAgent
 Responsibility:
   • Execute each generated Playwright script from its exported .py file
-    (or fall back to running the script string directly if no file exists).
+    (or inline fallback).
   • Capture: pass/fail, error message, duration (ms), execution timestamp.
-  • Store AutomationResult objects on AgentContext for ExcelAgent to consume.
+  • Honour ctx.headed / ctx.slow_mo — when headed=True each test opens a
+    visible browser window so you can watch every action live.
 
-Execution strategy
-──────────────────
-1. If ctx.scripts_dir is set, run the exported test_TC00X.py files via
-   `python test_TCXXX.py` inside the correct subfolder — this exercises the
-   real files the user will build on.
-2. Fallback: if no scripts_dir, execute tc.auto_script as an inline string
-   in a subprocess (original behaviour).
-
-Both paths run each test in its own subprocess with a configurable timeout.
+Headed mode
+───────────
+When ctx.headed is True:
+  • Tests run ONE AT A TIME (no parallelism) so windows don't pile up
+  • The PLAYWRIGHT_HEADED=1 env var is passed to each subprocess so the
+    script's own `headless=False` launch arg is respected
+  • ctx.slow_mo controls the delay (ms) between actions (default 400ms)
+    — slows the browser enough to follow what is happening
+  • Timeout is automatically extended to 120s (from 60s) to accommodate
+    the slower pace
 """
 import sys
 from pathlib import Path
@@ -30,53 +32,81 @@ from datetime import datetime
 from logger import log
 from models import AgentContext, AutomationResult, TestCase
 
-NAME         = "TestExecutionAgent"
-EXEC_TIMEOUT = 60   # seconds per test
+NAME              = "TestExecutionAgent"
+EXEC_TIMEOUT      = 60    # seconds — headless
+EXEC_TIMEOUT_HEADED = 120  # seconds — headed (slower due to slow_mo + visible rendering)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Low-level subprocess runner
+# Subprocess environment builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_file(file_path: str, tc_id: str) -> tuple[bool, str, int]:
+def _make_env(headed: bool, slow_mo: int) -> dict:
+    """Build the subprocess environment dict with Playwright settings injected."""
+    env = os.environ.copy()
+    if headed:
+        env["PLAYWRIGHT_HEADED"]  = "1"
+        env["PLAYWRIGHT_SLOW_MO"] = str(slow_mo)
+    else:
+        env.pop("PLAYWRIGHT_HEADED",  None)
+        env.pop("PLAYWRIGHT_SLOW_MO", None)
+    return env
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Low-level runners
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _run_file(
+    file_path: str,
+    tc_id: str,
+    headed: bool = False,
+    slow_mo: int = 0,
+) -> tuple[bool, str, int]:
     """
-    Run a test_TC00X.py file directly.
+    Run a test_TC00X.py file in its own subfolder.
     Returns (passed, error_message, duration_ms).
     """
-    start = datetime.now()
+    timeout = EXEC_TIMEOUT_HEADED if headed else EXEC_TIMEOUT
+    env     = _make_env(headed, slow_mo)
+    start   = datetime.now()
+
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, file_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path(file_path).parent),
+            stdout = asyncio.subprocess.PIPE,
+            stderr = asyncio.subprocess.PIPE,
+            cwd    = str(Path(file_path).parent),
+            env    = env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=EXEC_TIMEOUT
+                proc.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             duration = int((datetime.now() - start).total_seconds() * 1000)
-            return False, f"Timeout after {EXEC_TIMEOUT}s", duration
+            return False, f"Timeout after {timeout}s", duration
 
         duration = int((datetime.now() - start).total_seconds() * 1000)
         if proc.returncode == 0:
             return True, "", duration
-        else:
-            err = stderr.decode(errors="replace").strip()
-            # Trim to last 1200 chars to keep the most relevant part
-            err = err[-1200:] if len(err) > 1200 else err
-            return False, err, duration
+        err = stderr.decode(errors="replace").strip()
+        return False, err[-1200:] if len(err) > 1200 else err, duration
 
     except Exception:
         duration = int((datetime.now() - start).total_seconds() * 1000)
         return False, traceback.format_exc(limit=4), duration
 
 
-async def _run_inline(script: str, tc_id: str) -> tuple[bool, str, int]:
+async def _run_inline(
+    script: str,
+    tc_id: str,
+    headed: bool = False,
+    slow_mo: int = 0,
+) -> tuple[bool, str, int]:
     """
-    Run a raw script string as an inline subprocess (fallback).
+    Run a raw script string in a subprocess (fallback when no file exists).
     Returns (passed, error_message, duration_ms).
     """
     wrapper = textwrap.dedent(f"""
@@ -93,29 +123,31 @@ async def _main():
 
 asyncio.run(_main())
 """)
-    start = datetime.now()
+    timeout = EXEC_TIMEOUT_HEADED if headed else EXEC_TIMEOUT
+    env     = _make_env(headed, slow_mo)
+    start   = datetime.now()
+
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-c", wrapper,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout = asyncio.subprocess.PIPE,
+            stderr = asyncio.subprocess.PIPE,
+            env    = env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=EXEC_TIMEOUT
+                proc.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             duration = int((datetime.now() - start).total_seconds() * 1000)
-            return False, f"Timeout after {EXEC_TIMEOUT}s", duration
+            return False, f"Timeout after {timeout}s", duration
 
         duration = int((datetime.now() - start).total_seconds() * 1000)
         if proc.returncode == 0:
             return True, "", duration
-        else:
-            err = stderr.decode(errors="replace").strip()
-            err = err[-1200:] if len(err) > 1200 else err
-            return False, err, duration
+        err = stderr.decode(errors="replace").strip()
+        return False, err[-1200:] if len(err) > 1200 else err, duration
 
     except Exception:
         duration = int((datetime.now() - start).total_seconds() * 1000)
@@ -123,9 +155,6 @@ asyncio.run(_main())
 
 
 def _find_script_file(scripts_dir: str, tc_id: str) -> str | None:
-    """
-    Locate  output/scripts/<run_id>/TC001_*/test_TC001.py  for a given tc_id.
-    """
     base = Path(scripts_dir)
     for folder in base.iterdir():
         if not folder.is_dir():
@@ -145,14 +174,24 @@ def _find_script_file(scripts_dir: str, tc_id: str) -> str | None:
 async def _execute_all(
     test_cases: list[TestCase],
     scripts_dir: str = "",
+    headed: bool = False,
+    slow_mo: int = 0,
 ) -> list[AutomationResult]:
 
     results: list[AutomationResult] = []
     total   = len(test_cases)
 
+    if headed:
+        log("info", NAME,
+            f"Headed mode ON — browsers will be visible  "
+            f"[slow_mo={slow_mo}ms, timeout={EXEC_TIMEOUT_HEADED}s]")
+        log("info", NAME,
+            "Tests run sequentially so browser windows don't stack up")
+
     for idx, tc in enumerate(test_cases, 1):
         log("run", NAME,
-            f"[{idx}/{total}] Running {tc.test_case_id}: {tc.test_case_title[:55]}")
+            f"[{idx}/{total}] {'👁  ' if headed else ''}Running "
+            f"{tc.test_case_id}: {tc.test_case_title[:55]}")
 
         if not tc.auto_script:
             log("warning", NAME, f"  No script — skipping {tc.test_case_id}")
@@ -168,20 +207,24 @@ async def _execute_all(
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Strategy 1: run exported file
         if scripts_dir:
             file_path = _find_script_file(scripts_dir, tc.test_case_id)
             if file_path:
-                passed, error, duration = await _run_file(file_path, tc.test_case_id)
+                passed, error, duration = await _run_file(
+                    file_path, tc.test_case_id, headed=headed, slow_mo=slow_mo
+                )
                 source = f"file:{Path(file_path).name}"
             else:
                 log("warning", NAME,
                     f"  Script file not found for {tc.test_case_id} — using inline")
-                passed, error, duration = await _run_inline(tc.auto_script, tc.test_case_id)
+                passed, error, duration = await _run_inline(
+                    tc.auto_script, tc.test_case_id, headed=headed, slow_mo=slow_mo
+                )
                 source = "inline"
         else:
-            # Strategy 2: inline fallback
-            passed, error, duration = await _run_inline(tc.auto_script, tc.test_case_id)
+            passed, error, duration = await _run_inline(
+                tc.auto_script, tc.test_case_id, headed=headed, slow_mo=slow_mo
+            )
             source = "inline"
 
         icon = "✅" if passed else "❌"
@@ -192,7 +235,6 @@ async def _execute_all(
             f"({duration}ms) [{source}]",
         )
         if not passed and error:
-            # Print first 200 chars of error inline for quick diagnosis
             snippet = error.splitlines()[-1] if error.splitlines() else error
             log("error", NAME, f"     └─ {snippet[:200]}")
 
@@ -205,6 +247,11 @@ async def _execute_all(
             script        = tc.auto_script,
         ))
 
+        # In headed mode pause briefly between tests so the user can see
+        # what just finished before the next window opens
+        if headed and idx < total:
+            await asyncio.sleep(0.8)
+
     return results
 
 
@@ -214,30 +261,34 @@ async def _execute_all(
 
 def run(ctx: AgentContext) -> list[AutomationResult]:
     """Execute all test cases and store results on AgentContext."""
+    headed  = getattr(ctx, "headed",  False)
+    slow_mo = getattr(ctx, "slow_mo", 400) if headed else 0
+
     log("agent", NAME,
         f"Executing {len(ctx.test_cases)} tests  "
-        f"[scripts_dir={'set' if ctx.scripts_dir else 'not set'}]")
+        f"[{'👁  headed' if headed else 'headless'}"
+        + (f", slow_mo={slow_mo}ms" if slow_mo else "") + "]")
 
-    # Guard: asyncio.run() can't be called inside an already-running loop
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 asyncio.run,
-                _execute_all(ctx.test_cases, ctx.scripts_dir)
+                _execute_all(ctx.test_cases, ctx.scripts_dir, headed, slow_mo)
             )
             results = future.result()
     except RuntimeError:
-        results = asyncio.run(_execute_all(ctx.test_cases, ctx.scripts_dir))
+        results = asyncio.run(
+            _execute_all(ctx.test_cases, ctx.scripts_dir, headed, slow_mo)
+        )
 
     ctx.automation_results = results
-
-    passed   = sum(1 for r in results if r.passed)
-    failed   = len(results) - passed
-    avg_ms   = int(sum(r.duration_ms for r in results) / max(len(results), 1))
+    passed = sum(1 for r in results if r.passed)
+    failed = len(results) - passed
+    avg_ms = int(sum(r.duration_ms for r in results) / max(len(results), 1))
 
     log("success", NAME,
-        f"Done — ✅ Passed: {passed}  ❌ Failed: {failed}  "
-        f"⏱ Avg: {avg_ms}ms")
+        f"Done — ✅ Passed: {passed}  ❌ Failed: {failed}  ⏱ Avg: {avg_ms}ms")
+    return results
     return results

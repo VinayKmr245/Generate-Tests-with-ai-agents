@@ -8,9 +8,7 @@ from pathlib import Path
 # ── Groq Models ──────────────────────────────────────────────────────────────
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 TEXT_MODEL   = "llama-3.3-70b-versatile"
-GROQ_API_KEY = "YOUR_GROQ_API_KEY"   # set as env var or directly here (not recommended)
-
-# set as env var or directly here (not recommended)
+GROQ_API_KEY = "YOUR_GROQ_API"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parent.parent
@@ -26,6 +24,15 @@ BROWSER_USER_AGENT = (
 )
 PAGE_LOAD_TIMEOUT    = 30_000   # ms
 NETWORK_IDLE_TIMEOUT = 10_000   # ms
+
+# ── Execution mode ────────────────────────────────────────────────────────────
+# Set HEADLESS=False to watch every test run in a visible browser window.
+# Controlled via --headed CLI flag or PLAYWRIGHT_HEADED=1 env var.
+HEADLESS: bool = os.getenv("PLAYWRIGHT_HEADED", "0") != "1"
+
+# Slow-motion delay (ms) between each Playwright action in headed mode.
+# Makes it easier to follow what the browser is doing.
+SLOW_MO: int = int(os.getenv("PLAYWRIGHT_SLOW_MO", "400"))
 
 # ── Excel Column Layout ───────────────────────────────────────────────────────
 # (1-indexed, matches openpyxl column numbers)

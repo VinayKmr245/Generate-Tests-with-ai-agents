@@ -22,8 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import re
 import textwrap
 
-from config import GROQ_API_KEY, TEXT_MODEL
 from groq import Groq
+
+from config import GROQ_API_KEY, TEXT_MODEL
 from logger import log
 from models import AgentContext, TestCase
 
@@ -39,15 +40,22 @@ def _header() -> str:
     return "import asyncio\nfrom playwright.async_api import async_playwright, expect\n"
 
 
-def _wrap(body: str, url: str) -> str:
-    """Wrap body into run_test() with headless Chromium boilerplate."""
+def _wrap(body: str, url: str, headless: bool = True, slow_mo: int = 0) -> str:
+    """Wrap body into run_test() with headless/headed Chromium boilerplate.
+
+    headless=False  → browser window is visible during execution
+    slow_mo         → ms delay between Playwright actions (useful in headed mode)
+    """
     indented = textwrap.indent(textwrap.dedent(body).strip(), "            ")
+    launch_args = f"headless={headless}"
+    if not headless and slow_mo > 0:
+        launch_args += f", slow_mo={slow_mo}"
     return (
         _header()
         + "\nasync def run_test() -> bool:\n"
         + "    try:\n"
         + f'        async with async_playwright() as p:\n'
-        + f'            browser = await p.chromium.launch(headless=True)\n'
+        + f'            browser = await p.chromium.launch({launch_args})\n'
         + f'            context = await browser.new_context(viewport={{"width": 1440, "height": 900}})\n'
         + f'            page    = await context.new_page()\n'
         + f'            await page.goto("{url}", wait_until="networkidle", timeout=30000)\n'
@@ -63,7 +71,7 @@ def _wrap(body: str, url: str) -> str:
 # Rule-based template library
 # ---------------------------------------------------------------------------
 
-def _script_page_load(tc, url, **_):
+def _script_page_load(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 title = await page.title()
 assert title.strip(), "Page title is empty"
@@ -71,10 +79,10 @@ assert page.url != "about:blank", "Page did not navigate"
 body_text = await page.inner_text("body")
 assert len(body_text.strip()) > 50, "Page body appears empty"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_navigation_links(tc, url, **_):
+def _script_navigation_links(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 links = page.get_by_role("link")
 count = await links.count()
@@ -84,10 +92,10 @@ for i in range(min(count, 10)):
     label = await links.nth(i).inner_text()
     assert href is not None, f"Link '{label}' has no href"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_login_valid(tc, url, credentials=None, **_):
+def _script_login_valid(tc, url, credentials=None, headless=True, slow_mo=0, **_):
     username = (credentials or {}).get("username", "testuser@example.com")
     password = (credentials or {}).get("password", "TestPassword123")
     body = f'''
@@ -112,10 +120,10 @@ await page.wait_for_load_state("networkidle", timeout=10000)
 password_still_visible = await page.locator('input[type="password"]').count()
 assert password_still_visible == 0 or page.url != "{url}", "Login did not succeed"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_login_empty_fields(tc, url, **_):
+def _script_login_empty_fields(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 for sel in ['button[type="submit"]','input[type="submit"]',
             'button:has-text("Login")','button:has-text("Sign in")']:
@@ -129,10 +137,10 @@ error_count = await page.locator(
 ).count()
 assert error_count > 0, "No validation error shown for empty form submission"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_login_invalid_creds(tc, url, **_):
+def _script_login_invalid_creds(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 for sel in ['input[type="email"]','input[name="username"]','input[name="email"]']:
     el = page.locator(sel).first
@@ -156,10 +164,10 @@ error_count = await page.locator(
 ).count()
 assert error_count > 0, "No error shown for invalid credentials"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_search(tc, url, **_):
+def _script_search(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 search_box = page.locator(
     'input[type="search"],input[name*="search" i],'
@@ -173,10 +181,10 @@ results = page.locator('[class*="result"],[class*="search"],[role="listbox"],[ro
 count   = await results.count()
 assert count > 0, f"Search returned no results"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_form_submit(tc, url, **_):
+def _script_form_submit(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 inputs = page.locator('input[type="text"],input[type="email"],textarea')
 count  = await inputs.count()
@@ -196,10 +204,10 @@ errors = []
 page.on("pageerror", lambda e: errors.append(str(e)))
 assert len(errors) == 0, f"JS errors after form submit: {errors[:3]}"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_dropdown(tc, url, **_):
+def _script_dropdown(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 selects = page.locator("select")
 if await selects.count() > 0:
@@ -217,10 +225,10 @@ else:
     assert await items.count() > 0, "Dropdown opened but no options visible"
     await items.first.click()
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_table(tc, url, **_):
+def _script_table(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 table = page.locator("table").first
 assert await table.count() > 0, "No table found"
@@ -231,10 +239,10 @@ assert await rows.count() > 0, "Table has no data rows"
 first_row_text = await rows.first.inner_text()
 assert first_row_text.strip(), "First table row is empty"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_modal(tc, url, **_):
+def _script_modal(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 trigger = page.locator(
     'button:has-text("Open"),button:has-text("View"),'
@@ -254,10 +262,10 @@ else:
     open_modal = await page.locator('[role="dialog"]:visible').count()
     assert open_modal == 0, "Unexpected modal is open on page load"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_responsive(tc, url, **_):
+def _script_responsive(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 await page.set_viewport_size({"width": 375, "height": 812})
 await page.reload(wait_until="networkidle")
@@ -266,10 +274,10 @@ client_w = await page.evaluate("document.documentElement.clientWidth")
 assert scroll_w <= client_w + 5, f"Horizontal overflow at 375px: scrollWidth={scroll_w}"
 await page.set_viewport_size({"width": 1440, "height": 900})
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_accessibility(tc, url, **_):
+def _script_accessibility(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 h1_count = await page.locator("h1").count()
 assert h1_count >= 1, f"No H1 heading found (got {h1_count})"
@@ -281,10 +289,10 @@ for i in range(min(img_count, 20)):
     src = await images.nth(i).get_attribute("src") or ""
     assert alt is not None, f"Image '{src}' missing alt attribute"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_keyboard(tc, url, **_):
+def _script_keyboard(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 focused = 0
 for _ in range(15):
@@ -294,10 +302,10 @@ for _ in range(15):
         focused += 1
 assert focused >= 3, f"Only {focused} elements received keyboard focus"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_404(tc, url, **_):
+def _script_404(tc, url, headless=True, slow_mo=0, **_):
     bad_url = url.rstrip("/") + "/this-page-does-not-exist-xyz-404test"
     body = f'''
 response = await page.goto("{bad_url}", wait_until="domcontentloaded")
@@ -310,10 +318,10 @@ if status == 200:
         "Got 200 for missing page but no error content found"
     )
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_performance(tc, url, **_):
+def _script_performance(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 timing = await page.evaluate("""() => {
     const t = performance.getEntriesByType('navigation')[0];
@@ -322,10 +330,10 @@ timing = await page.evaluate("""() => {
 assert timing is not None, "Navigation timing API unavailable"
 assert timing < 5000, f"Page loaded in {timing:.0f}ms — exceeds 5s threshold"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_images(tc, url, **_):
+def _script_images(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 broken = await page.evaluate("""() => {
     return [...document.images]
@@ -334,10 +342,10 @@ broken = await page.evaluate("""() => {
 }""")
 assert len(broken) == 0, f"{len(broken)} broken image(s): {broken[:5]}"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_footer(tc, url, **_):
+def _script_footer(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 footer = page.locator("footer,[role='contentinfo'],#footer,.footer").first
 assert await footer.count() > 0, "No footer element found"
@@ -345,10 +353,10 @@ assert await footer.is_visible(), "Footer is not visible"
 footer_links = footer.locator("a")
 assert await footer_links.count() > 0, "Footer has no links"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_buttons(tc, url, **_):
+def _script_buttons(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 buttons = page.get_by_role("button")
 count   = await buttons.count()
@@ -359,10 +367,10 @@ for i in range(min(count, 15)):
     assert await btn.is_visible(), f"Button '{label}' not visible"
     assert await btn.is_enabled(), f"Button '{label}' unexpectedly disabled"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_title_visible(tc, url, **_):
+def _script_title_visible(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 heading = page.get_by_role("heading").first
 assert await heading.count() > 0, "No heading found on page"
@@ -370,10 +378,10 @@ await expect(heading).to_be_visible()
 title = await page.title()
 assert title.strip(), "Browser tab title is empty"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
-def _script_generic(tc, url, **_):
+def _script_generic(tc, url, headless=True, slow_mo=0, **_):
     body = '''
 errors = []
 page.on("pageerror", lambda e: errors.append(str(e)))
@@ -384,7 +392,7 @@ assert title.strip(), "Page title is empty"
 assert len(body_text.strip()) > 50, "Page body appears empty"
 assert len(errors) == 0, f"Console JS errors: {errors[:3]}"
 '''
-    return _wrap(body, url)
+    return _wrap(body, url, headless=headless, slow_mo=slow_mo)
 
 
 # ---------------------------------------------------------------------------
@@ -487,22 +495,30 @@ def _llm_script(tc: TestCase, url: str, credentials=None) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_script(tc: TestCase, url: str, credentials=None) -> str:
+def generate_script(tc: TestCase, url: str, credentials=None,
+                    headless: bool = True, slow_mo: int = 0) -> str:
     fn = _match_rule(tc)
     if fn:
         log("info", NAME, f"{tc.test_case_id} → rule [{fn.__name__}]")
-        return fn(tc=tc, url=url, credentials=credentials)
+        return fn(tc=tc, url=url, credentials=credentials,
+                  headless=headless, slow_mo=slow_mo)
     log("info", NAME, f"{tc.test_case_id} → LLM fallback")
     return _llm_script(tc, url, credentials)
 
 
 def run(ctx: AgentContext) -> list[TestCase]:
-    log("agent", NAME, f"Generating scripts for {len(ctx.test_cases)} test cases")
+    headless = not getattr(ctx, "headed", False)
+    slow_mo  = getattr(ctx, "slow_mo", 0) if not headless else 0
+    log("agent", NAME,
+        f"Generating scripts for {len(ctx.test_cases)} test cases  "
+        f"[{'headed' if not headless else 'headless'}"
+        + (f", slow_mo={slow_mo}ms" if slow_mo else "") + "]")
     rule_n = llm_n = 0
     for tc in ctx.test_cases:
         fn = _match_rule(tc)
         if fn:
-            tc.auto_script = fn(tc=tc, url=ctx.url, credentials=ctx.credentials)
+            tc.auto_script = fn(tc=tc, url=ctx.url, credentials=ctx.credentials,
+                                headless=headless, slow_mo=slow_mo)
             rule_n += 1
         else:
             tc.auto_script = _llm_script(tc, ctx.url, ctx.credentials)
