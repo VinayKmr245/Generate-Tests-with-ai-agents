@@ -7,10 +7,25 @@ from typing import Optional
 
 @dataclass
 class UIComponent:
-    type: str
-    label: str
-    purpose: str
-    location: str
+    type: str       # canonical type: button | text_input | email_input | password_input |
+                    # number_input | textarea | select | checkbox | radio |
+                    # file_input | date_input | link | form | etc.
+    label: str      # visible text, placeholder, aria-label, or name
+    purpose: str    # inferred purpose
+    location: str   # header | nav | main | footer | sidebar | unknown
+
+    # Rich selector data scraped from live DOM (not inferred from screenshot)
+    tag: str = ""               # raw HTML tag: input, button, select, textarea, a
+    input_type: str = ""        # input[type] attribute value
+    selector: str = ""          # most specific CSS selector to target this element
+    name: str = ""              # name attribute
+    element_id: str = ""        # id attribute
+    placeholder: str = ""       # placeholder attribute
+    aria_label: str = ""        # aria-label attribute
+    is_visible: bool = True     # element is in viewport / not hidden
+    is_enabled: bool = True     # element is not disabled
+    is_required: bool = False   # required attribute present
+    dom_section: str = ""       # closest landmark: form#id, section, header, etc.
 
 
 @dataclass

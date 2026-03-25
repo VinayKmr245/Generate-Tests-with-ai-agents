@@ -32,8 +32,20 @@ for web pages. Return ONLY a valid JSON array — no markdown, no commentary."""
 
 def _build_prompt(analysis: PageAnalysis, module_name: str | None = None) -> str:
     components_json = json.dumps(
-        [{"type": c.type, "label": c.label, "purpose": c.purpose, "location": c.location}
-         for c in analysis.components],
+        [
+            {
+                "type":        c.type,
+                "label":       c.label,
+                "purpose":     c.purpose,
+                "location":    c.location,
+                "selector":    c.selector,
+                "dom_section": c.dom_section,
+                "is_required": c.is_required,
+                "input_type":  c.input_type,
+                "placeholder": c.placeholder,
+            }
+            for c in analysis.components
+        ],
         indent=2,
     )
     ctx_label = "after successful login" if analysis.post_login else "before login / public view"
