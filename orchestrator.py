@@ -4,7 +4,7 @@ Web Test Agent — Orchestrator
 
 Pipeline modes
 ──────────────
-  full       Browse → Analyse → Generate tests → Export scripts
+  full       Browse → Analyse → Generate tests → Build Selector Map → Export scripts
              → Execute → Update Excel
              (complete end-to-end run)
 
@@ -81,6 +81,7 @@ import browser_agent as browser_agent
 import excel_agent as excel_agent
 import script_export_agent as script_export_agent
 import script_generation_agent as script_gen_agent
+import selector_map_agent as selector_map_agent
 import test_execution_agent as exec_agent
 import test_generation_agent as test_gen_agent
 import vision_agent as vision_agent
@@ -128,6 +129,15 @@ def _generation_phase(ctx: AgentContext):
 def _excel_write_phase(ctx: AgentContext) -> str:
     section("Agent 4 — Excel Agent  [write]")
     return excel_agent.run(ctx, mode="write")
+
+
+def _selector_map_phase(ctx: AgentContext):
+    section("Agent 8 — Selector Map Agent")
+    selector_map_agent.run(ctx)
+    if ctx.selectors_json_path:
+        log("success", "Orchestrator", f"Selectors JSON → {ctx.selectors_json_path}")
+    n = len(ctx.selector_map.get("all", []))
+    log("info", "Orchestrator", f"{n} exact selectors ready for script generation")
 
 
 def _script_phase(ctx: AgentContext):
@@ -181,6 +191,7 @@ async def run_full_pipeline(
     _excel_write_phase(ctx)
     log("excel", "Orchestrator", f"Excel saved → {ctx.excel_path}")
 
+    _selector_map_phase(ctx)
     _script_phase(ctx)
     _script_export_phase(ctx)
     _execution_phase(ctx)
@@ -214,6 +225,7 @@ async def run_generate_only(
         _vision_phase(ctx, browser_result)
 
     _generation_phase(ctx)
+    _selector_map_phase(ctx)
     _excel_write_phase(ctx)
 
     section("Generate-Only Pipeline Complete")
@@ -234,6 +246,9 @@ async def run_automate_existing(
     ctx.test_cases = excel_agent.read_test_cases(excel_path)
     log("excel", "Orchestrator", f"Loaded {len(ctx.test_cases)} test cases")
 
+    # Rebuild selector map if we have a target URL to scrape
+    if ctx.url:
+        _selector_map_phase(ctx)
     _script_phase(ctx)
     _script_export_phase(ctx)
     _execution_phase(ctx)

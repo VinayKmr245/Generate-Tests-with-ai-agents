@@ -1,7 +1,6 @@
-"""Simple coloured console logger shared across all agents."""
+"""Simple coloured console logger shared across all """
 import sys
 from datetime import datetime
-
 
 ICONS = {
     "info":    "ℹ️ ",

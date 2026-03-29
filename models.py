@@ -1,5 +1,5 @@
 """
-Shared data-transfer objects used across all agents.
+Shared data-transfer objects used across all 
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -93,3 +93,8 @@ class AgentContext:
     scripts_dir: str = ""   # populated by ScriptExportAgent
     headed: bool = False    # True → visible browser window during test execution
     slow_mo: int = 400      # ms delay between actions in headed mode
+    # Populated by SelectorMapAgent — keyed by component type,
+    # value is a list of real CSS selectors scraped from the live DOM
+    selector_map: dict = field(default_factory=dict)
+    # Path to the saved selectors JSON file
+    selectors_json_path: str = ""
